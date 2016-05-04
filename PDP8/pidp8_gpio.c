@@ -169,6 +169,8 @@ void *blink(int *terminate)
     short_wait(); // probably unnecessary
     // --------------------------------------------------
 
+    int invert_DEP = -1;    // unknown mode
+
     while(*terminate==0)
     {
         // prepare for lighting LEDs by setting col pins to output
@@ -222,11 +224,20 @@ void *blink(int *terminate)
             }
             INP_GPIO(rows[i]);          // stop sinking current from this row of switches
 
+            if (i == 2 && invert_DEP == 1)
+                switchscan ^= (1 << 9);
+
             // Capture rising edges into switches_event.
             uint16_t rising = ~switchscan & ~switches.raw[i];
             switches_event.raw[i] |= rising;
             switches.raw[i] = ~switchscan;
         }
+
+        // First time after startup, determine whether DEP is mounted upside
+        // down & flip accordingly. This assumes that the switch isn't held
+        // during startup.
+        if (invert_DEP == -1)
+            invert_DEP = switches.DEP;
     }
 
     // at this stage, all cols, rows, ledrows are set to input, so elegant way of closing down.
