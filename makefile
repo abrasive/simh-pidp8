@@ -1168,6 +1168,8 @@ PDP8 = ${PDP8D}/pdp8_cpu.c ${PDP8D}/pdp8_clk.c ${PDP8D}/pdp8_df.c \
 	${PDP8D}/pdp8_td.c ${PDP8D}/pdp8_ct.c ${PDP8D}/pdp8_fpp.c
 PDP8_OPT = -I ${PDP8D}
 
+PIDP8 = ${PDP8} gpio.c
+PIDP8_OPT = ${PDP8_OPT} -DPIDP8
 
 H316D = H316
 H316 = ${H316D}/h316_stddev.c ${H316D}/h316_lp.c ${H316D}/h316_cpu.c \
@@ -1496,6 +1498,12 @@ pdp8 : ${BIN}pdp8${EXE}
 ${BIN}pdp8${EXE} : ${PDP8} ${SIM}
 	${MKDIRBIN}
 	${CC} ${PDP8} ${SIM} ${PDP8_OPT} $(CC_OUTSPEC) ${LDFLAGS}
+
+pidp8 : ${BIN}pidp8${EXE}
+
+${BIN}pidp8${EXE} : ${PIDP8} ${SIM}
+	${MKDIRBIN}
+	${CC} ${PIDP8} ${SIM} ${PIDP8_OPT} $(CC_OUTSPEC) ${LDFLAGS}
 
 pdp9 : ${BIN}pdp9${EXE}
 
