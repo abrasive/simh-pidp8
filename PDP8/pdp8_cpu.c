@@ -241,6 +241,28 @@ int32 hst_p = 0;                                        /* history pointer */
 int32 hst_lnt = 0;                                      /* history length */
 InstHistory *hst = NULL;                                /* instruction history */
 
+/* ------------------------------------------------------------------------------------------------- */
+extern uint32 switchstatus[3]; // bitfields: 3 rows of up to 12 switches
+extern uint32 ledstatus[8];	// bitfields: 8 ledrows of up to 12 LEDs
+void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sIF, int32 sDF);
+/* ------------------------------------------------------------------------------------------------- */
+/* --------------------------------------------------------------------------------------------------------- */
+int swStop = 0, swExam = 0, swDep = 0, swCont2 = 0, swStart = 0, swSingStep = 0, swAttach = 0;
+char mountedFiles[8][CBUFSIZE];
+char	swDevCode[4];
+int	awfulHackFlag=0;	// truly terrible even for me - break out of sim and start new script in scp.c
+
+/* --------------------------------------------------------------------------------------------------------- */
+/* --------------------------------------------------------------------------------------------------------- */
+#include <dirent.h>	// for USB stick searching
+int mountUSBStickFile(int devNo, char *devCode, char *sPath);
+extern t_stat attach_cmd (int32 flag, char *cptr); // from scp
+extern t_stat do_cmd (int32 flag, char *cptr); // from scp
+extern t_stat spawn_cmd (int32 flag, char *cptr);
+extern t_stat exit_cmd (int32 flag, char *cptr);
+char xcbuf[CBUFSIZE], *xcptr;
+/* --------------------------------------------------------------------------------------------------------- */
+
 t_stat cpu_ex (t_value *vptr, t_addr addr, UNIT *uptr, int32 sw);
 t_stat cpu_dep (t_value val, t_addr addr, UNIT *uptr, int32 sw);
 t_stat cpu_reset (DEVICE *dptr);
@@ -334,14 +356,215 @@ MQ = saved_MQ & 07777;
 int_req = INT_UPDATE;
 reason = 0;
 
+
+/* ---PiDP add--------------------------------------------------------------------------------------------- */
+int swDevice;
+char sScript[256];
+MA = 0;	// have to add this to avoid crash when stop switch is set at start - MA would be undefined in setleds
+setleds(PC, MA, MB, LAC, MQ, IF, DF); // note MB used // light up leds for 1st time, only needed when stop switch set at start
+/* ---PiDP end---------------------------------------------------------------------------------------------- */
+
+
 /* Main instruction fetch/decode loop */
 
 while (reason == 0) {                                   /* loop until halted */
+
+
+/* ---PiDP add--------------------------------------------------------------------------------------------- */
+awfulHackFlag = 0; // no do script pending. Did I mention awful?
+
+ledstatus[5] |= 1<<3; // set fetch
+ledstatus[5] &= ~(1<<2); // clear execute
+/* ---PiDP end---------------------------------------------------------------------------------------------- */
+
 
     if (sim_interval <= 0) {                            /* check clock queue */
         if ((reason = sim_process_event ()))
             break;
         }
+
+/* ---PiDP add--------------------------------------------------------------------------------------------- */
+
+// this bit of code detects SING_INST as the special features switch.
+// when DF switches are set, that raises a hacked-in-to-simh signal to ATTACH PTR <filename>
+// when IF switches are set, that raises a hacked-in-to-simh signal to DO <filename> (boot script)
+
+if ((switchstatus[2] & 0x0020)==0) //SING_STEP toggled
+{
+	if (swAttach==0)		// if this is the first time we detect it,
+	{
+		swAttach=1;		// make this a momentary switch in software
+
+		// 1. Scan DF to see if any devices need to be mounted (DF=0 --> nothing to mount)
+
+		swDevice = (((switchstatus[1] >> 11) & 1)==0?4:0)
+			+(((switchstatus[1] >> 10) & 1)==0?2:0)
+			+(((switchstatus[1] >> 9) & 1)==0?1:0);
+
+		if (swDevice!=0)
+		{
+			switch(swDevice)
+			{
+				case 1:	strcpy(swDevCode,"ptr"); break;	// PTR paper tape reader
+				case 2:	strcpy(swDevCode,"ptp"); break;	// High speed paper tape punch
+				case 3:	strcpy(swDevCode,"dt0"); break;	// TC08 DECtape (#8 is first!)
+				case 4:	strcpy(swDevCode,"dt1"); break;
+				case 5:	strcpy(swDevCode,"rx0"); break;	// RX8E (8/e peripheral!)
+				case 6:	strcpy(swDevCode,"rx1"); break;
+				case 7:	strcpy(swDevCode,"rl0"); break;	// RL8A
+			}
+			xcptr=&xcbuf[0];				// set string pointer to start
+			mountUSBStickFile(swDevice, swDevCode, xcptr);
+		}
+
+		// 2. Scan IF to see if we need to reboot with a new bootscript
+
+		swDevice = (((switchstatus[1] >> 8) & 1)==0?4:0)
+			+(((switchstatus[1] >> 7) & 1)==0?2:0)
+			+(((switchstatus[1] >> 6) & 1)==0?1:0);
+
+		if (swDevice!=0)
+		{
+			sprintf(sScript,"/opt/pidp8/bootscripts/%d.script", swDevice);	// make filename
+			printf("\r\n\nRebooting %s\r\n\n", sScript);
+			reason = STOP_HALT;
+			awfulHackFlag = swDevice;	// this triggers a do command after leaving the simulator run.
+		}
+
+		// 3. Scan for shutdown command (Sing_Step + Sing_inst + Start)
+
+		if (((switchstatus[2] & 0x0800)==0) && ((switchstatus[2] & 0x0010)==0))
+		{
+			printf("\r\nShutdown\r\n\r\n");
+			reason = STOP_HALT;
+			awfulHackFlag = 8;	// this triggers an exit command after leaving the simulator run.
+			if(spawn_cmd ((int32) 0, " shutdown -h -t 1 now")!=SCPE_OK)		// issue simh attach command (no sudo in buildroot)
+				printf("\r\n\n\nshutdown failed\r\n\n");
+		}
+
+		// 4. Scan for host reboot command (Sing_Step + Sing_Inst + Cont)
+
+		if (((switchstatus[2] & 0x0080)==0) && ((switchstatus[2] & 0x0010)==0))
+		{
+			printf("\r\nReboot\r\n\r\n");
+			reason = STOP_HALT;
+			awfulHackFlag = 8;      // this triggers an exit command after leaving the simulator run.
+			if(spawn_cmd ((int32) 0, " reboot")!=SCPE_OK) {// no sudo in buildroot env
+				printf("\r\n\n\nreboot failed\r\n\n");
+			}
+		}
+
+
+		// 5. Scan for mount command (Sing_Step + Sing_Inst + Load Add)
+
+		if ((switchstatus[2] & 0x0410)==0)
+		{
+			printf("\r\nMount\r\n\r\n");
+			if(spawn_cmd ((int32) 0, " /opt/pidp8/bin/automount")!=SCPE_OK) {// no sudo in buildroot env
+				printf("\r\n\n\nmount USB drive failed\r\n\n");
+			}
+		}
+
+		// 6. Scan for unmount command (Sing_Step + Sing_Inst + Deposit)
+
+		if ((switchstatus[2] & 0x0210)==0)
+		{
+			printf("\r\nUnmount\r\n\r\n");
+			if(spawn_cmd ((int32) 0, " /opt/pidp8/bin/unmount")!=SCPE_OK) {// no sudo in buildroot env
+				printf("\r\n\n\nunmount failed\r\n\n");
+			}
+		}
+	}
+}
+if (swAttach==1)		// Sing_Step switch is back to off again
+	if ((switchstatus[2] & 0x0020)!=0)		// switch deactivated
+		swAttach=0;				// reset 'avoid repeat' indicator
+
+/* ---PiDP end---------------------------------------------------------------------------------------------- */
+
+
+/* ---PiDP add--------------------------------------------------------------------------------------------- */
+
+if ((switchstatus[2] & 0x0800)==0)	// START switch activated
+	if (swStart==0)
+	{
+	        int_req = int_req & ~INT_ION;		// disable ION. says so in handbook, true?
+		LAC = 0;				// Clear LAC;
+		// IR = 0 				// clear IR (handbook says so but would be weird)
+		MB = 0;					// clear MB.
+		MA = PC & 07777;			// transfer PC into MA  (not necessary because IR is redone in code below?
+		swStop = 0;
+		swStart = 1;				// single shot
+	}
+if (swStart==1)
+	if ((switchstatus[2] & 0x0800)!=0)		// START switch deactivated
+		swStart=0;				// reset 'avoid repeat' indicator
+
+
+if ((switchstatus[2] & 0x0080)==0)			// CONT switch activated
+	if (swCont2==0)
+	{	swStop = 0;				// meaning resume execution
+			// ? is this done: MB contains instruction to be executed after CONT is pressed
+		swCont2 = 1;				// single shot
+		goto contPoint;				// note: only for cont not for start
+	}
+if (swCont2==1)
+	if ((switchstatus[2] & 0x0080)!=0)		// CONT switch deactivated
+		swCont2=0;				// reset 'avoid repeat' indicator
+
+
+if ((switchstatus[2] & 0x0400)==0)			// LOAD_ADD switch activated
+{
+	PC = switchstatus[0] ^ 07777;			// copy SR into PC
+							// copy DF and IF too
+	DF = (((switchstatus[1] >> 11) & 1)==0?4:0)
+	+(((switchstatus[1] >> 10) & 1)==0?2:0)
+	+(((switchstatus[1] >> 9) & 1)==0?1:0);
+	DF = DF<<12;					// DF is saved in oct digit 5, so it's easy to add to PC
+
+	IF = (((switchstatus[1] >> 8) & 1)==0?4:0)
+	+(((switchstatus[1] >> 7) & 1)==0?2:0)
+	+(((switchstatus[1] >> 6) & 1)==0?1:0);
+	IF = IF<<12;					// DF is saved in oct digit 5, so it's easy to add to PC
+}
+
+if ((switchstatus[2] & 0x0200)==0)			// DEP switch activated
+{	if (swDep==0)
+	{	M[PC] = switchstatus[0] ^ 07777;
+		/* ??? in 66 handbook: strictly speaking, SR goes into AC, then AC into MB. Does it clear AC afterwards? If not, needs fix */
+		MB = M[PC];
+		MA = PC & 07777;			// 20150315: MA trails PC on FP
+		PC = (PC + 1) & 07777;			// increment PC
+		swDep=1;				// avoid repeat
+	}
+}
+if (swDep==1)
+	if ((switchstatus[2] & 0x0200)!=0)		// DEP switch deactivated
+		swDep=0;				// reset 'avoid repeat' indicator
+
+if ((switchstatus[2] & 0x0100)==0)			// EXAM switch activated
+{	if (swExam==0)
+	{	MB = M[PC];
+		MA = PC & 07777;			// 20150315: MA trails PC on FP
+		PC = (PC + 1) & 07777;			// increment PC
+		swExam=1;				// avoid repeat
+	}
+}
+if (swExam==1)
+	if ((switchstatus[2] & 0x0100)!=0)		// EXAM switch deactivated
+		swExam=0;				// reset 'avoid repeat' indicator
+
+
+// do what needs to be done in STOP mode:
+if (swStop==1)
+{	setleds(PC, MA, MB, LAC, MQ, IF, DF); 		// note MB used in this call, not M[MA]
+	sim_interval = sim_interval - 1;		// otherwise, CTRL-E will never be acted upon in stop mode
+							// WARNING: THIS MAY LEAD TO TROUBLE. MAYBE?
+	goto skip;					// a goto is period correct methinks
+}
+
+/* ---PiDP end---------------------------------------------------------------------------------------------- */
+
 
     if (int_req > INT_PENDING) {                        /* interrupt? */
         int_req = int_req & ~INT_ION;                   /* interrupts off */
@@ -369,6 +592,33 @@ while (reason == 0) {                                   /* loop until halted */
     int_req = int_req | INT_NO_ION_PENDING;             /* clear ION delay */
     sim_interval = sim_interval - 1;
 
+
+/* ---PiDP add--------------------------------------------------------------------------------------------- */
+
+setleds(PC, MA, M[MA], LAC, MQ, IF, DF); // note M[MA] used not MB
+
+if  ((switchstatus[2] & 0x040)==0)  		// STOP switch activated
+{	swStop = 1;
+	goto skip;
+}
+
+contPoint:	;	// goto here if CONT has been pressed to finish current instruction
+
+// SING_STEP: swStop=0 if we're here. If SingStep then this time, let it go but trigger a stop on the next pass
+
+if ((switchstatus[2] & 0x0010)==0)		// SING_INST switch activated
+{	if (swSingStep==0)		// allow it this time,
+		swSingStep=1;		// but note to block it next time!
+	else				// else: this is the next time...
+	{	swSingStep=0;		// reset flipflop
+		swStop=1;		// and do what you do when STOP is pressed.
+		goto skip;
+	}
+}
+
+/* ---PiDP end---------------------------------------------------------------------------------------------- */
+
+
 /* Instruction decoding.
 
    The opcode (IR<0:2>), indirect flag (IR<3>), and page flag (IR<4>)
@@ -385,6 +635,11 @@ while (reason == 0) {                                   /* loop until halted */
 
    Note that MA contains IF'PC.
 */
+
+/* --------------------------------------------------------------------------------------------------------- */
+ledstatus[5] |= 1<<2; // set execute
+ledstatus[5] &= ~(1<<3); // clear fetch
+/* --------------------------------------------------------------------------------------------------------- */
 
     if (hst_lnt) {                                      /* history enabled? */
         int32 ea;
@@ -912,10 +1167,23 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
                 tsc_cdf = 0;                            /* clear flag */
                 }
             else {
-                if (IR & 04)                            /* OSR */
+                if (IR & 04){                           /* OSR */
+//--- PiDP bug fix 20150822----------------------------------------------------------------
+//OSR never got updated when PDP-8 is running
+//separate bug, not fixed yet: OSR should be updated by DEP and LOAD_ADD switch handlers I think
+// OSR should probably be loaded with switchstatus[0] in every cycle. Doing it here is just a temp fix.
+//-----------------------------------------------------------------------------------------
+
+ 		    OSR = switchstatus[0] ^ 07777;
                     LAC = LAC | OSR;
+		}
                 if (IR & 02)                            /* HLT */
-                    reason = STOP_HALT;
+//--- PiDP change--------------------------------------------------------------------------
+//                    reason = STOP_HALT;
+//-----------------------------------------------------------------------------------------
+			swStop=1;	// don't step out of simulation, just do STOP
+//--- end of PiDP change--------------------------------------------------------------------------
+
                 }
             break;
             }                                           /* end if group 2 */
@@ -1186,6 +1454,13 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
             break;
             }
         device = (IR >> 3) & 077;                       /* device = IR<3:8> */
+
+/* --------------------------------------------------------------------------------------------------------- */
+// the IOT ION, IOF do not light pause, anything else does:
+if (device>02)
+	ledstatus[6] |= 1<<8; // set pause led
+/* --------------------------------------------------------------------------------------------------------- */
+
         pulse = IR & 07;                                /* pulse = IR<9:11> */
         iot_data = LAC & 07777;                         /* AC unchanged */
         switch (device) {                               /* decode IR<3:8> */
@@ -1247,6 +1522,11 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
 
         case 020:case 021:case 022:case 023:
         case 024:case 025:case 026:case 027:            /* memory extension */
+
+/* --------------------------------------------------------------------------------------------------------- */
+// Memory extension does not trigger IOP pauses --> do not light pause
+/* --------------------------------------------------------------------------------------------------------- */
+
             switch (pulse) {                            /* decode IR<9:11> */
 
             case 1:                                     /* CDF */
@@ -1335,18 +1615,48 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
 
         default:                                        /* I/O device */
             if (dev_tab[device]) {                      /* dev present? */
+
+/* --------------------------------------------------------------------------------------------------------- */
+// Any other device will trigger IOP --> light pause:
+ledstatus[6] |= 1<<8; // set pause led
+/* --------------------------------------------------------------------------------------------------------- */
+
                 iot_data = dev_tab[device] (IR, iot_data);
                 LAC = (LAC & 010000) | (iot_data & 07777);
                 if (iot_data & IOT_SKP)
                     PC = (PC + 1) & 07777;
+/* --------------------------------------------------------------------------------------------------------- */
+		else
+		{
+// simh does not distinguish between the various Data Break types.
+// WC, CA and Break are lit up jointly on the PiDP. Although this can be improved upon.
+
+//ledstatus[5] |= 1<<0; // set WC led
+//ledstatus[6] |= 1<<11; // set CA led
+//ledstatus[6] |= 1<<10; // set Break led
+		}
+/* --------------------------------------------------------------------------------------------------------- */
+
                 if (iot_data >= IOT_REASON)
                     reason = iot_data >> IOT_V_REASON;
                 }
             else reason = stop_inst;                    /* stop on flag */
             break;
             }                                           /* end switch device */
+/* --------------------------------------------------------------------------------------------------------- */
+ledstatus[6] &= ~(1<<8); // clear pause led
+
+ledstatus[5] &= ~(1<<0); // clear WC led
+ledstatus[6] &= ~(1<<11); // clear CA led
+ledstatus[6] &= ~(1<<10); // clear Break led
+/* --------------------------------------------------------------------------------------------------------- */
         break;                                          /* end case IOT */
         }                                               /* end switch opcode */
+
+/* ------------------------------------------------------------------------- */
+skip:	;	// goto label
+/* ------------------------------------------------------------------------- */
+
     }                                                   /* end while */
 
 /* Simulation halted */
@@ -1582,3 +1892,142 @@ for (k = 0; k < lnt; k++) {                             /* print specified */
     }                                                   /* end for */
 return SCPE_OK;
 }
+
+
+
+/* ------------------------------------------------------------------------------------ */
+uint32 tempLeds=0;
+void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sIF, int32 sDF)
+{
+
+	ledstatus[0] = (uint32) sPC;
+	ledstatus[1] = (uint32) sMA;
+	ledstatus[2] = (uint32) sMB;
+	ledstatus[3] = (uint32) sLAC;
+	ledstatus[4] = (uint32) sMQ;
+
+	// instruction leds: decode instruction in memory (could also be found in IR)
+//this *should* be found in IR, methinks. Just from memory is possibly problematic
+
+//	tempLeds = ledstatus[5] & 12; // preserve value of fetch/execute handled in main loop
+	tempLeds = ledstatus[5] & 13; // preserve value of fetch/execute/WC handled in main loop
+
+	switch((M[sMA] & 0xE00) >> 9)
+	{
+		case 0:	tempLeds+=(1<<11); break;		// 000 AND
+		case 1:	tempLeds+=(1<<10); break;		// 001 TAD
+		case 2:	tempLeds+=(1<<9); break;		// 010 DCA
+		case 3:	tempLeds+=(1<<8); break;		// 011 ISZ
+		case 4:	tempLeds+=(1<<7); break;		// 100 JMS
+		case 5:	tempLeds+=(1<<6); break;		// 101 JMP
+		case 6:	tempLeds+=(1<<5); break;		// 110 IOT
+		case 7: tempLeds+=(1<<4); break;		// 111-0 and 111-1 OPR group 1 & 2
+		default: printf("instruction error in multiplexer");	// debug only, remove
+	}
+
+	if ( ((M[sMA] & 0xE00) >> 9) <= 5)	// <=5: all memory reference instructions
+		if ((M[sMA] & 0x100) != 0)	// if fourth bit is set, this is indirect addressing, so...
+		tempLeds += (1<<1);		// ...light defer
+
+	ledstatus[5]=tempLeds;
+
+//	tempLeds = 0; //ledstatus[6]; // want to preserve value of some leds set in main loop
+	tempLeds = ledstatus[6] & 0xd00; // want to preserve value of CA/break/pause set in main loop
+
+							// CAddr led - handled in main loop
+							// Break led - handled in main loop
+	tempLeds |= ((int_req & INT_ION)==0?0:1)<<9;	// ION led
+							// Pause led - handled in main loop
+	if (swStop==0)	tempLeds |= (1<<7);		// RUN led
+	ledstatus[6]=tempLeds;
+
+	// DF & IF in simh live in the 3 bits of octal digit #5...
+	tempLeds = (uint32) (sDF>>3); // shift down from oct digit 5 to HW cols 1-3 (SW col[3-5])
+	tempLeds += (uint32) (sIF>>6); // shift down from oct digit 5 to HW cols 4-6 (SW col[9-11]
+	// Link
+	tempLeds += (uint32) ((sLAC & 010000)>>7); // shift down from bit 12 to bit 8
+
+	ledstatus[7]=tempLeds;
+
+}
+/* ------------------------------------------------------------------------------------ */
+
+//--- PiDP add -------------------------------------------------------------
+
+int mountUSBStickFile(int devNo, char *devCode, char *sPath)
+{
+	char	sUSBPath[CBUFSIZE];		// will be "/media/usb0" etc
+	char	sFoundFile[CBUFSIZE];		// path & name of file that is found
+	char	fileExtension[4];		// will be ".RX" etc
+	FILE 	*fp;
+	DIR 	*pDir;
+	struct 	dirent *pDirent;
+	int 	i,j, alreadyMounted;
+
+	fileExtension[0]='.';			// extension starts with a .
+	strncpy(&fileExtension[1], devCode, 2);	// extension is PT, RX, RL etc
+	fileExtension[2]=0;			// don't want device number
+	sFoundFile[0]=0;			// empty string, no file found yet
+
+	// if mounting another image to a device, clear the current file from the mountlist:
+	mountedFiles[devNo][0]=0x00;
+
+	for (i=0;i<8;i++)				// search all 8 USB mount points
+	{
+		sprintf(sUSBPath,"/media/usb%d",i);	// usb sticks are numbered 0..7
+//printf("1- %s\r\n", sUSBPath);
+		pDir = opendir(sUSBPath);
+		if (pDir==NULL) 			// that means usbmount not installed?
+		{	printf("\r\nCannot open usb%d directory\r\n", i); return 1;	}
+
+		while ((pDirent = readdir(pDir)) != NULL) // search all files in directory
+		{
+			if (strstr(pDirent->d_name,fileExtension))
+			{
+				sprintf(sPath, "%s/%s", sUSBPath, pDirent->d_name);
+				alreadyMounted=0;
+				for (j=0;j<7;j++)
+				{
+					if (strncmp(mountedFiles[j],sPath, CBUFSIZE)==0)
+						alreadyMounted=1;
+//printf("   >%s %d\r\n", mountedFiles[j], strncmp(mountedFiles[j],sPath, CBUFSIZE));
+
+				}
+				if (alreadyMounted==0)
+				{
+					strcpy(sFoundFile, sPath);
+//printf("2-%s\r\n", sFoundFile);
+					break;		// break out of while loop
+				}
+			}
+		}
+		closedir (pDir);
+
+		if (sFoundFile[0]!=0)
+			break;
+	}
+
+//printf("3-%s\r\n", sFoundFile);
+
+	if (sFoundFile[0]==0x00)			// no file found, exit
+	{	printf("\r\nNo unmounted %s file found\r\n", devCode);	return 1;	}
+
+	fp = fopen(sFoundFile, "r");			// check file is OK
+	if (fp==NULL)
+	{	printf("\r\nError opening file %s\r\n", sFoundFile);	return 1;	}
+	fclose (fp);
+
+
+	sprintf(sPath,"%s %s", devCode, sFoundFile);	// print cmd string
+//	printf("\r\nMounting %s\r\n", sPath);
+
+	if(attach_cmd ((int32) 0, xcptr)==SCPE_OK)		// issue simh attach command
+	{	strcpy(mountedFiles[devNo], sFoundFile);		// add file to mount list
+printf("\r\nMounted %s %s\r\n", devCode, mountedFiles[devNo]);
+	}
+	else
+	{	printf("\r\nSimH error mounting %s\r\n", devCode);	return 1;	}
+
+	return 0;
+}
+

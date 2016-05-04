@@ -213,6 +213,15 @@
 
 /* Macros and data structures */
 
+#ifdef PIDP8
+#include <pthread.h>
+#include <time.h>
+#include <stdint.h>
+#include <unistd.h>	// for sleep()
+
+extern void *blink(void *ptr);	// the real-time multiplexing process to start up
+#endif
+
 #define NOT_MUX_USING_CODE /* sim_tmxr library provider or agnostic */
 
 #include "sim_defs.h"
@@ -313,6 +322,10 @@
     else if (sim_switches & SWMASK ('D')) val = 10; \
     else if (sim_switches & SWMASK ('H')) val = 16; \
     else val = dft;
+
+#ifdef PIDP8
+extern int awfulHackFlag;
+#endif
 
 /* Asynch I/O support */
 #if defined (SIM_ASYNCH_IO)
@@ -1890,6 +1903,26 @@ int32 i, sw;
 t_bool lookswitch;
 t_stat stat;
 
+#ifdef PIDP8
+// PiDP8 hack here
+ pthread_t thread1;
+ const char *message="Thread 1";
+ int terminate=0, iret1;
+//	printf("\nPiDP FP driver 3\n");
+
+ // create thread
+ iret1 = pthread_create( &thread1, NULL, blink, &terminate);
+
+ if (iret1) {
+   fprintf(stderr, "Error creating thread, return code %d\n", iret1);
+   exit (EXIT_FAILURE);
+ }
+//	printf("Created thread, return code %d\n", iret1);
+
+ sleep(2);			// allow 2 sec for multiplex to start
+// ------------------------------------------------------------------------
+#endif
+
 #if defined (__MWERKS__) && defined (macintosh)
 argc = ccommand (&argv);
 #endif
@@ -2020,6 +2053,13 @@ AIO_CLEANUP;                                            /* Asynch I/O */
 sim_cleanup_sock ();                                    /* cleanup sockets */
 fclose (stdnul);                                        /* close bit bucket file handle */
 free (targv);                                           /* release any argv copy that was made */
+
+#ifdef PIDP8
+ terminate=1;
+ if (pthread_join(thread1, NULL))
+   printf("\r\nError joining multiplex thread\r\n");
+#endif
+
 return 0;
 }
 
@@ -2031,6 +2071,22 @@ CTAB *cmdp;
 
 stat = SCPE_BARE_STATUS(stat);                          /* remove possible flag */
 while (stat != SCPE_EXIT) {                             /* in case exit */
+#ifdef PIDP8
+if (awfulHackFlag!=0) {
+  if (awfulHackFlag==8)
+    sprintf(cbuf, "exit");	// inject command into command line processor.
+  else
+    sprintf(cbuf, "do /opt/pidp8/bootscripts/%d.script", awfulHackFlag);
+  cptr = cbuf;
+ }
+ else if ((cptr = sim_brk_getact (cbuf, sizeof(cbuf))))   /* pending action? */
+   printf ("%s%s\n", sim_prompt, cptr);            /* echo */
+ else if (sim_vm_read != NULL) {                     /* sim routine? */
+   printf ("%s", sim_prompt);                      /* prompt */
+   cptr = (*sim_vm_read) (cbuf, sizeof(cbuf), stdin);
+ }
+ else cptr = read_line_p (sim_prompt, cbuf, sizeof(cbuf), stdin);/* read with prmopt*/
+#else
     if ((cptr = sim_brk_getact (cbuf, sizeof(cbuf))))   /* pending action? */
         printf ("%s%s\n", sim_prompt, cptr);            /* echo */
     else if (sim_vm_read != NULL) {                     /* sim routine? */
@@ -2038,6 +2094,7 @@ while (stat != SCPE_EXIT) {                             /* in case exit */
         cptr = (*sim_vm_read) (cbuf, sizeof(cbuf), stdin);
         }
     else cptr = read_line_p (sim_prompt, cbuf, sizeof(cbuf), stdin);/* read with prmopt*/
+#endif
     if (cptr == NULL) {                                 /* EOF? */
         if (sim_ttisatty()) continue;                   /* ignore tty EOF */
         else break;                                     /* otherwise exit */
