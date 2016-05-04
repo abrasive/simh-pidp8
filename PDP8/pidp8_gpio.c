@@ -18,7 +18,7 @@
 #include <time.h>
 #include <pthread.h>
 #include <stdint.h>
-#include "gpio.h"
+#include "pidp8_gpio.h"
 
 typedef unsigned int    uint32; 
 typedef signed int      int32; 
