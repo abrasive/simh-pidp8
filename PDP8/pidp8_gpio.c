@@ -4,8 +4,8 @@
  * www.obsolescenceguaranteed.blogspot.com
  *
  * The only communication with the main program (simh):
- * - external variable ledstatus is read to determine which leds to light.
- * - external variable switchstatus is updated with current switch settings.
+ * - external variable leds is read to determine which leds to light.
+ * - external variable switches is updated with current switch settings.
  *
 */
 
@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include "pidp8_gpio.h"
 
 #define BLOCK_SIZE      (4*1024)
 
@@ -37,8 +38,8 @@ struct bcm2835_peripheral gpio; // needs initialisation
 
 long intervl = 300000;      // light each row of leds this long
 
-uint32_t switchstatus[3] = { 0 }; // bitfields: 3 rows of up to 12 switches
-uint32_t ledstatus[8] = { 0 };    // bitfields: 8 ledrows of up to 12 LEDs
+pidp_switch_t switches = { 0 }, switches_event = { 0 };
+pidp_led_t leds;
 
 // PART 1 - GPIO and RT process stuff ----------------------------------
 
@@ -179,10 +180,9 @@ void *blink(int *terminate)
         // light up 8 rows of 12 LEDs each
         for (i=0;i<8;i++)
         {
-
             // Toggle columns for this ledrow (which LEDs should be on (CLR = on))
             for (k=0;k<12;k++)
-            {   if ((ledstatus[i]&(1<<k))==0)
+            {   if ((leds.raw[i]&(1<<k))==0)
                     GPIO_SET = 1 << cols[k];
                 else
                     GPIO_CLR = 1 << cols[k];
@@ -222,7 +222,10 @@ void *blink(int *terminate)
             }
             INP_GPIO(rows[i]);          // stop sinking current from this row of switches
 
-            switchstatus[i] = switchscan;
+            // Capture rising edges into switches_event.
+            uint16_t rising = ~switchscan & ~switches.raw[i];
+            switches_event.raw[i] |= rising;
+            switches.raw[i] = ~switchscan;
         }
     }
 

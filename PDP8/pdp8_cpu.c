@@ -244,7 +244,7 @@ InstHistory *hst = NULL;                                /* instruction history *
 
 #ifdef PIDP8
 void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sIF, int32 sDF);
-int swStop = 0, swExam = 0, swDep = 0, swCont2 = 0, swStart = 0, swSingStep = 0, swAttach = 0;
+int swStop = 0, swSingStep = 0;
 char mountedFiles[8][CBUFSIZE];
 char    swDevCode[4];
 int awfulHackFlag=0;    // truly terrible even for me - break out of sim and start new script in scp.c
@@ -365,8 +365,8 @@ while (reason == 0) {                                   /* loop until halted */
 #ifdef PIDP8
     awfulHackFlag = 0; // no do script pending. Did I mention awful?
 
-    ledstatus[5] |= 1<<3; // set fetch
-    ledstatus[5] &= ~(1<<2); // clear execute
+    leds.FETCH = 1;
+    leds.EXEC = 0;
 #endif
 
     if (sim_interval <= 0) {                            /* check clock queue */
@@ -379,167 +379,127 @@ while (reason == 0) {                                   /* loop until halted */
     // when DF switches are set, that raises a hacked-in-to-simh signal to ATTACH PTR <filename>
     // when IF switches are set, that raises a hacked-in-to-simh signal to DO <filename> (boot script)
 
-    if ((switchstatus[2] & 0x0020)==0) //SING_STEP toggled
+    if (switches_event.SING_STEP) {
+        switches_event.SING_STEP = 0;
+        // 1. Scan DF to see if any devices need to be mounted (DF=0 --> nothing to mount)
+
+        swDevice = switches.DF;
+
+        if (swDevice!=0)
+        {
+            switch(swDevice)
+            {
+                case 1: strcpy(swDevCode,"ptr"); break; // PTR paper tape reader
+                case 2: strcpy(swDevCode,"ptp"); break; // High speed paper tape punch
+                case 3: strcpy(swDevCode,"dt0"); break; // TC08 DECtape (#8 is first!)
+                case 4: strcpy(swDevCode,"dt1"); break;
+                case 5: strcpy(swDevCode,"rx0"); break; // RX8E (8/e peripheral!)
+                case 6: strcpy(swDevCode,"rx1"); break;
+                case 7: strcpy(swDevCode,"rl0"); break; // RL8A
+            }
+            xcptr=&xcbuf[0];                // set string pointer to start
+            mountUSBStickFile(swDevice, swDevCode, xcptr);
+        }
+
+        // 2. Scan IF to see if we need to reboot with a new bootscript
+
+        swDevice = switches.IF;
+
+        if (swDevice!=0)
+        {
+            sprintf(sScript,"/opt/pidp8/bootscripts/%d.script", swDevice);  // make filename
+            printf("\r\n\nRebooting %s\r\n\n", sScript);
+            reason = STOP_HALT;
+            awfulHackFlag = swDevice;   // this triggers a do command after leaving the simulator run.
+        }
+
+        // 3. Scan for shutdown command (Sing_Step + Sing_inst + Start)
+
+        if (switches.SING_INST && switches.START)
+        {
+            printf("\r\nShutdown\r\n\r\n");
+            reason = STOP_HALT;
+            awfulHackFlag = 8;  // this triggers an exit command after leaving the simulator run.
+            if(spawn_cmd ((int32) 0, " shutdown -h -t 1 now")!=SCPE_OK)     // issue simh attach command (no sudo in buildroot)
+                printf("\r\n\n\nshutdown failed\r\n\n");
+        }
+
+        // 4. Scan for host reboot command (Sing_Step + Sing_Inst + Cont)
+
+        if (switches.SING_INST && switches.CONT)
+        {
+            printf("\r\nReboot\r\n\r\n");
+            reason = STOP_HALT;
+            awfulHackFlag = 8;      // this triggers an exit command after leaving the simulator run.
+            if(spawn_cmd ((int32) 0, " reboot")!=SCPE_OK) {// no sudo in buildroot env
+                printf("\r\n\n\nreboot failed\r\n\n");
+            }
+        }
+
+
+        // 5. Scan for mount command (Sing_Step + Sing_Inst + Load Add)
+
+        if (switches.SING_INST && switches.LOAD_ADD)
+        {
+            printf("\r\nMount\r\n\r\n");
+            if(spawn_cmd ((int32) 0, " /opt/pidp8/bin/automount")!=SCPE_OK) {// no sudo in buildroot env
+                printf("\r\n\n\nmount USB drive failed\r\n\n");
+            }
+        }
+
+        // 6. Scan for unmount command (Sing_Step + Sing_Inst + Deposit)
+
+        if (switches.SING_INST && switches.DEP)
+        {
+            printf("\r\nUnmount\r\n\r\n");
+            if(spawn_cmd ((int32) 0, " /opt/pidp8/bin/unmount")!=SCPE_OK) {// no sudo in buildroot env
+                printf("\r\n\n\nunmount failed\r\n\n");
+            }
+        }
+    }
+
+    if (switches_event.START) {
+        switches_event.START = 0;
+        int_req = int_req & ~INT_ION;       // disable ION. says so in handbook, true?
+        LAC = 0;                // Clear LAC;
+        // IR = 0               // clear IR (handbook says so but would be weird)
+        MB = 0;                 // clear MB.
+        MA = PC & 07777;            // transfer PC into MA  (not necessary because IR is redone in code below?
+        swStop = 0;
+    }
+
+    if (switches_event.CONT) {
+        switches_event.CONT = 0;
+        swStop = 0;             // meaning resume execution
+            // ? is this done: MB contains instruction to be executed after CONT is pressed
+        goto contPoint;             // note: only for cont not for start
+    }
+
+    if (switches.LOAD_ADD)
     {
-        if (swAttach==0)        // if this is the first time we detect it,
-        {
-            swAttach=1;     // make this a momentary switch in software
-
-            // 1. Scan DF to see if any devices need to be mounted (DF=0 --> nothing to mount)
-
-            swDevice = (((switchstatus[1] >> 11) & 1)==0?4:0)
-                +(((switchstatus[1] >> 10) & 1)==0?2:0)
-                +(((switchstatus[1] >> 9) & 1)==0?1:0);
-
-            if (swDevice!=0)
-            {
-                switch(swDevice)
-                {
-                    case 1: strcpy(swDevCode,"ptr"); break; // PTR paper tape reader
-                    case 2: strcpy(swDevCode,"ptp"); break; // High speed paper tape punch
-                    case 3: strcpy(swDevCode,"dt0"); break; // TC08 DECtape (#8 is first!)
-                    case 4: strcpy(swDevCode,"dt1"); break;
-                    case 5: strcpy(swDevCode,"rx0"); break; // RX8E (8/e peripheral!)
-                    case 6: strcpy(swDevCode,"rx1"); break;
-                    case 7: strcpy(swDevCode,"rl0"); break; // RL8A
-                }
-                xcptr=&xcbuf[0];                // set string pointer to start
-                mountUSBStickFile(swDevice, swDevCode, xcptr);
-            }
-
-            // 2. Scan IF to see if we need to reboot with a new bootscript
-
-            swDevice = (((switchstatus[1] >> 8) & 1)==0?4:0)
-                +(((switchstatus[1] >> 7) & 1)==0?2:0)
-                +(((switchstatus[1] >> 6) & 1)==0?1:0);
-
-            if (swDevice!=0)
-            {
-                sprintf(sScript,"/opt/pidp8/bootscripts/%d.script", swDevice);  // make filename
-                printf("\r\n\nRebooting %s\r\n\n", sScript);
-                reason = STOP_HALT;
-                awfulHackFlag = swDevice;   // this triggers a do command after leaving the simulator run.
-            }
-
-            // 3. Scan for shutdown command (Sing_Step + Sing_inst + Start)
-
-            if (((switchstatus[2] & 0x0800)==0) && ((switchstatus[2] & 0x0010)==0))
-            {
-                printf("\r\nShutdown\r\n\r\n");
-                reason = STOP_HALT;
-                awfulHackFlag = 8;  // this triggers an exit command after leaving the simulator run.
-                if(spawn_cmd ((int32) 0, " shutdown -h -t 1 now")!=SCPE_OK)     // issue simh attach command (no sudo in buildroot)
-                    printf("\r\n\n\nshutdown failed\r\n\n");
-            }
-
-            // 4. Scan for host reboot command (Sing_Step + Sing_Inst + Cont)
-
-            if (((switchstatus[2] & 0x0080)==0) && ((switchstatus[2] & 0x0010)==0))
-            {
-                printf("\r\nReboot\r\n\r\n");
-                reason = STOP_HALT;
-                awfulHackFlag = 8;      // this triggers an exit command after leaving the simulator run.
-                if(spawn_cmd ((int32) 0, " reboot")!=SCPE_OK) {// no sudo in buildroot env
-                    printf("\r\n\n\nreboot failed\r\n\n");
-                }
-            }
-
-
-            // 5. Scan for mount command (Sing_Step + Sing_Inst + Load Add)
-
-            if ((switchstatus[2] & 0x0410)==0)
-            {
-                printf("\r\nMount\r\n\r\n");
-                if(spawn_cmd ((int32) 0, " /opt/pidp8/bin/automount")!=SCPE_OK) {// no sudo in buildroot env
-                    printf("\r\n\n\nmount USB drive failed\r\n\n");
-                }
-            }
-
-            // 6. Scan for unmount command (Sing_Step + Sing_Inst + Deposit)
-
-            if ((switchstatus[2] & 0x0210)==0)
-            {
-                printf("\r\nUnmount\r\n\r\n");
-                if(spawn_cmd ((int32) 0, " /opt/pidp8/bin/unmount")!=SCPE_OK) {// no sudo in buildroot env
-                    printf("\r\n\n\nunmount failed\r\n\n");
-                }
-            }
-        }
+        PC = switches.SR & 07777;
+        DF = (switches.DF & 07) << 12;
+        IF = (switches.IF & 07) << 12;
     }
-    if (swAttach==1)        // Sing_Step switch is back to off again
-        if ((switchstatus[2] & 0x0020)!=0)      // switch deactivated
-            swAttach=0;             // reset 'avoid repeat' indicator
 
-    if ((switchstatus[2] & 0x0800)==0)  // START switch activated
-        if (swStart==0)
-        {
-            int_req = int_req & ~INT_ION;       // disable ION. says so in handbook, true?
-            LAC = 0;                // Clear LAC;
-            // IR = 0               // clear IR (handbook says so but would be weird)
-            MB = 0;                 // clear MB.
-            MA = PC & 07777;            // transfer PC into MA  (not necessary because IR is redone in code below?
-            swStop = 0;
-            swStart = 1;                // single shot
-        }
-    if (swStart==1)
-        if ((switchstatus[2] & 0x0800)!=0)      // START switch deactivated
-            swStart=0;              // reset 'avoid repeat' indicator
-
-
-    if ((switchstatus[2] & 0x0080)==0)          // CONT switch activated
-        if (swCont2==0)
-        {
-            swStop = 0;             // meaning resume execution
-                // ? is this done: MB contains instruction to be executed after CONT is pressed
-            swCont2 = 1;                // single shot
-            goto contPoint;             // note: only for cont not for start
-        }
-    if (swCont2==1)
-        if ((switchstatus[2] & 0x0080)!=0)      // CONT switch deactivated
-            swCont2=0;              // reset 'avoid repeat' indicator
-
-
-    if ((switchstatus[2] & 0x0400)==0)          // LOAD_ADD switch activated
+    if (switches_event.DEP)
     {
-        PC = switchstatus[0] ^ 07777;           // copy SR into PC
-                                // copy DF and IF too
-        DF = (((switchstatus[1] >> 11) & 1)==0?4:0)
-        +(((switchstatus[1] >> 10) & 1)==0?2:0)
-        +(((switchstatus[1] >> 9) & 1)==0?1:0);
-        DF = DF<<12;                    // DF is saved in oct digit 5, so it's easy to add to PC
+        switches_event.DEP = 0;
 
-        IF = (((switchstatus[1] >> 8) & 1)==0?4:0)
-        +(((switchstatus[1] >> 7) & 1)==0?2:0)
-        +(((switchstatus[1] >> 6) & 1)==0?1:0);
-        IF = IF<<12;                    // DF is saved in oct digit 5, so it's easy to add to PC
+        M[PC] = switches.SR;
+        /* ??? in 66 handbook: strictly speaking, SR goes into AC, then AC into MB. Does it clear AC afterwards? If not, needs fix */
+        MB = M[PC];
+        MA = PC & 07777;            // 20150315: MA trails PC on FP
+        PC = (PC + 1) & 07777;          // increment PC
     }
 
-    if ((switchstatus[2] & 0x0200)==0)          // DEP switch activated
-    {   if (swDep==0)
-        {   M[PC] = switchstatus[0] ^ 07777;
-            /* ??? in 66 handbook: strictly speaking, SR goes into AC, then AC into MB. Does it clear AC afterwards? If not, needs fix */
-            MB = M[PC];
-            MA = PC & 07777;            // 20150315: MA trails PC on FP
-            PC = (PC + 1) & 07777;          // increment PC
-            swDep=1;                // avoid repeat
-        }
+    if (switches_event.EXAM)
+    {
+        switches_event.EXAM = 0;
+        MB = M[PC];
+        MA = PC & 07777;            // 20150315: MA trails PC on FP
+        PC = (PC + 1) & 07777;          // increment PC
     }
-    if (swDep==1)
-        if ((switchstatus[2] & 0x0200)!=0)      // DEP switch deactivated
-            swDep=0;                // reset 'avoid repeat' indicator
-
-    if ((switchstatus[2] & 0x0100)==0)          // EXAM switch activated
-    {   if (swExam==0)
-        {   MB = M[PC];
-            MA = PC & 07777;            // 20150315: MA trails PC on FP
-            PC = (PC + 1) & 07777;          // increment PC
-            swExam=1;               // avoid repeat
-        }
-    }
-    if (swExam==1)
-        if ((switchstatus[2] & 0x0100)!=0)      // EXAM switch deactivated
-            swExam=0;               // reset 'avoid repeat' indicator
-
 
     // do what needs to be done in STOP mode:
     if (swStop==1)
@@ -579,7 +539,7 @@ while (reason == 0) {                                   /* loop until halted */
 #ifdef PIDP8
     setleds(PC, MA, M[MA], LAC, MQ, IF, DF); // note M[MA] used not MB
 
-    if  ((switchstatus[2] & 0x040)==0)          // STOP switch activated
+    if  (switches.STOP)          // STOP switch activated
     {   swStop = 1;
         continue;
     }
@@ -588,7 +548,7 @@ contPoint:   // goto here if CONT has been pressed to finish current instruction
 
     // SING_STEP: swStop=0 if we're here. If SingStep then this time, let it go but trigger a stop on the next pass
 
-    if ((switchstatus[2] & 0x0010)==0)      // SING_INST switch activated
+    if (switches.SING_INST)      // SING_INST switch activated
     {   if (swSingStep==0)      // allow it this time,
             swSingStep=1;       // but note to block it next time!
         else                // else: this is the next time...
@@ -617,8 +577,8 @@ contPoint:   // goto here if CONT has been pressed to finish current instruction
 */
 
 #ifdef PIDP8
-    ledstatus[5] |= 1<<2; // set execute
-    ledstatus[5] &= ~(1<<3); // clear fetch
+    leds.EXEC = 1;
+    leds.FETCH = 0;
 #endif
 
     if (hst_lnt) {                                      /* history enabled? */
@@ -1152,10 +1112,10 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
 //--- PiDP bug fix 20150822----------------------------------------------------------------
 //OSR never got updated when PDP-8 is running
 //separate bug, not fixed yet: OSR should be updated by DEP and LOAD_ADD switch handlers I think
-// OSR should probably be loaded with switchstatus[0] in every cycle. Doing it here is just a temp fix.
+// OSR should probably be loaded with switches in every cycle. Doing it here is just a temp fix.
 //-----------------------------------------------------------------------------------------
 
-                    OSR = switchstatus[0] ^ 07777;
+                    OSR = switches.SR;
 #endif
                     LAC = LAC | OSR;
                 }
@@ -1440,7 +1400,7 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
 #ifdef PIDP8
         // the IOT ION, IOF do not light pause, anything else does:
         if (device>02)
-            ledstatus[6] |= 1<<8; // set pause led
+            leds.PAUSE = 1;
 #endif
 
         pulse = IR & 07;                                /* pulse = IR<9:11> */
@@ -1596,7 +1556,7 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
 
 #ifdef PIDP8
                 // Any other device will trigger IOP --> light pause:
-                ledstatus[6] |= 1<<8; // set pause led
+                leds.PAUSE = 1;
 #endif
 
                 iot_data = dev_tab[device] (IR, iot_data);
@@ -1608,9 +1568,9 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
                     // simh does not distinguish between the various Data Break types.
                     // WC, CA and Break are lit up jointly on the PiDP. Although this can be improved upon.
 
-                    //ledstatus[5] |= 1<<0; // set WC led
-                    //ledstatus[6] |= 1<<11; // set CA led
-                    //ledstatus[6] |= 1<<10; // set Break led
+                    // leds.WRDCT = 1
+                    // leds.CURAD = 1
+                    // leds.BREAK = 1
                 }
 
                 if (iot_data >= IOT_REASON)
@@ -1621,10 +1581,10 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
             }                                           /* end switch device */
 
 #ifdef PIDP8
-        ledstatus[6] &= ~(1<<8); // clear pause led
-        ledstatus[5] &= ~(1<<0); // clear WC led
-        ledstatus[6] &= ~(1<<11); // clear CA led
-        ledstatus[6] &= ~(1<<10); // clear Break led
+        leds.PAUSE = 0;
+        leds.WRDCT = 0;
+        leds.CURAD = 0;
+        leds.BREAK = 0;
 #endif
         break;                                          /* end case IOT */
         }                                               /* end switch opcode */
@@ -1869,54 +1829,37 @@ return SCPE_OK;
 uint32 tempLeds=0;
 void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sIF, int32 sDF)
 {
-
-    ledstatus[0] = (uint32) sPC;
-    ledstatus[1] = (uint32) sMA;
-    ledstatus[2] = (uint32) sMB;
-    ledstatus[3] = (uint32) sLAC;
-    ledstatus[4] = (uint32) sMQ;
+    leds.PC = sPC;
+    leds.MA = sMA;
+    leds.MB = sMB;
+    leds.AC = sLAC;
+    leds.MQ = sMQ;
 
     // instruction leds: decode instruction in memory (could also be found in IR)
     //this *should* be found in IR, methinks. Just from memory is possibly problematic
+    int insn = M[sMA];
+    int opcode = (insn & 0xE00) >> 9;
 
-    tempLeds = ledstatus[5] & 13; // preserve value of fetch/execute/WC handled in main loop
+    leds.AND = (opcode == 0);
+    leds.TAD = (opcode == 1);
+    leds.DCA = (opcode == 2);
+    leds.ISZ = (opcode == 3);
+    leds.JMS = (opcode == 4);
+    leds.JMP = (opcode == 5);
+    leds.IOT = (opcode == 6);
+    leds.OPR = (opcode == 7);
 
-    switch((M[sMA] & 0xE00) >> 9)
-    {
-        case 0: tempLeds+=(1<<11); break;       // 000 AND
-        case 1: tempLeds+=(1<<10); break;       // 001 TAD
-        case 2: tempLeds+=(1<<9); break;        // 010 DCA
-        case 3: tempLeds+=(1<<8); break;        // 011 ISZ
-        case 4: tempLeds+=(1<<7); break;        // 100 JMS
-        case 5: tempLeds+=(1<<6); break;        // 101 JMP
-        case 6: tempLeds+=(1<<5); break;        // 110 IOT
-        case 7: tempLeds+=(1<<4); break;        // 111-0 and 111-1 OPR group 1 & 2
-        default: printf("instruction error in multiplexer");    // debug only, remove
-    }
+    leds.DEFER = (opcode <= 5) &&   // <=5: all memory reference instructions
+                 (insn & 0x100);    // indirect addressing
 
-    if ( ((M[sMA] & 0xE00) >> 9) <= 5)  // <=5: all memory reference instructions
-        if ((M[sMA] & 0x100) != 0)  // if fourth bit is set, this is indirect addressing, so...
-        tempLeds += (1<<1);     // ...light defer
-
-    ledstatus[5]=tempLeds;
-
-    tempLeds = ledstatus[6] & 0xd00; // want to preserve value of CA/break/pause set in main loop
-
-                            // CAddr led - handled in main loop
-                            // Break led - handled in main loop
-    tempLeds |= ((int_req & INT_ION)==0?0:1)<<9;    // ION led
-                            // Pause led - handled in main loop
-    if (swStop==0)  tempLeds |= (1<<7);     // RUN led
-    ledstatus[6]=tempLeds;
+    leds.ION = !!(int_req & INT_ION);
+    leds.RUN = (swStop == 0);
 
     // DF & IF in simh live in the 3 bits of octal digit #5...
-    tempLeds = (uint32) (sDF>>3); // shift down from oct digit 5 to HW cols 1-3 (SW col[3-5])
-    tempLeds += (uint32) (sIF>>6); // shift down from oct digit 5 to HW cols 4-6 (SW col[9-11]
+    leds.DF = sDF >> 12;
+    leds.IF = sIF >> 12;
     // Link
-    tempLeds += (uint32) ((sLAC & 010000)>>7); // shift down from bit 12 to bit 8
-
-    ledstatus[7]=tempLeds;
-
+    leds.LINK = !!(sLAC & 010000);
 }
 
 int mountUSBStickFile(int devNo, char *devCode, char *sPath)
