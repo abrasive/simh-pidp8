@@ -1,26 +1,10 @@
-#ifdef PIDP8
-#include <stdio.h>
- 
-#include <sys/mman.h>
-#include <sys/types.h>
-#include <sys/stat.h>
- 
-#include <unistd.h>
-#include <fcntl.h> // extra
+/*
+ * pidp8_gpio.h: moving parts for blinking lights
+ */
 
- 
-//#define BCM2708_PERI_BASE       0x3f000000
-//#define GPIO_BASE               (BCM2708_PERI_BASE + 0x200000)	// GPIO controller 
- 
-#define BLOCK_SIZE 		(4*1024)
- 
-// IO Acces
-struct bcm2835_peripheral {
-    unsigned long addr_p;
-    int mem_fd;
-    void *map;
-    volatile unsigned int *addr;
-};
- 
-//struct bcm2835_peripheral gpio = {GPIO_BASE};
-#endif
+#include <stdint.h>
+
+extern uint32_t switchstatus[3];  // bitfields: 3 rows of up to 12 switches
+extern uint32_t ledstatus[8];     // bitfields: 8 ledrows of up to 12 LEDs
+
+void *blink(int *terminate);      // LED/switch driver thread function

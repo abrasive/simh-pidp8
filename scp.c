@@ -217,9 +217,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <stdint.h>
-#include <unistd.h>	// for sleep()
-
-extern void *blink(void *ptr);	// the real-time multiplexing process to start up
+#include <pidp8_gpio.h>
 #endif
 
 #define NOT_MUX_USING_CODE /* sim_tmxr library provider or agnostic */
@@ -1904,23 +1902,13 @@ t_bool lookswitch;
 t_stat stat;
 
 #ifdef PIDP8
-// PiDP8 hack here
- pthread_t thread1;
- const char *message="Thread 1";
- int terminate=0, iret1;
-//	printf("\nPiDP FP driver 3\n");
+pthread_t thread;
+int terminate=0;
 
- // create thread
- iret1 = pthread_create( &thread1, NULL, blink, &terminate);
-
- if (iret1) {
-   fprintf(stderr, "Error creating thread, return code %d\n", iret1);
-   exit (EXIT_FAILURE);
- }
-//	printf("Created thread, return code %d\n", iret1);
-
- sleep(2);			// allow 2 sec for multiplex to start
-// ------------------------------------------------------------------------
+if (pthread_create( &thread, NULL, blink, &terminate)) {
+    perror("Error creating thread");
+    exit (EXIT_FAILURE);
+}
 #endif
 
 #if defined (__MWERKS__) && defined (macintosh)
@@ -2055,9 +2043,9 @@ fclose (stdnul);                                        /* close bit bucket file
 free (targv);                                           /* release any argv copy that was made */
 
 #ifdef PIDP8
- terminate=1;
- if (pthread_join(thread1, NULL))
-   printf("\r\nError joining multiplex thread\r\n");
+terminate=1;
+if (pthread_join(thread, NULL))
+    sim_printf("Error joining multiplex thread");
 #endif
 
 return 0;
