@@ -244,7 +244,7 @@ int32 hst_lnt = 0;                                      /* history length */
 InstHistory *hst = NULL;                                /* instruction history */
 
 #ifdef PIDP8
-void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sIF, int32 sDF);
+void setleds(uint32 sPC, uint32 sIR, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sIF, int32 sDF);
 int run_flop = 1;
 #endif
 
@@ -342,8 +342,9 @@ int_req = INT_UPDATE;
 reason = 0;
 
 #ifdef PIDP8
-MA = 0; // have to add this to avoid crash when stop switch is set at start - MA would be undefined in setleds
-setleds(PC, MA, MB, LAC, MQ, IF, DF);
+MA = IF | PC;
+MB = M[MA];
+setleds(PC, IR, MA, MB, LAC, MQ, IF, DF);
 #endif
 
 /* Main instruction fetch/decode loop */
@@ -411,7 +412,7 @@ while (reason == 0) {                                   /* loop until halted */
 
     if (!run_flop) {    // keep marking time when stopped
         sim_interval -= 1;
-        setleds(PC, MA, MB, LAC, MQ, IF, DF);
+        setleds(PC, IR, MA, MB, LAC, MQ, IF, DF);
         continue;
     }
 
@@ -446,7 +447,7 @@ while (reason == 0) {                                   /* loop until halted */
     sim_interval = sim_interval - 1;
 
 #ifdef PIDP8
-    setleds(PC, MA, IR, LAC, MQ, IF, DF);
+    setleds(PC, IR, MA, IR, LAC, MQ, IF, DF);
 #endif
 
 /* Instruction decoding.
@@ -1476,7 +1477,7 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
         leds.CURAD = 0;
         leds.BREAK = 0;
 
-        setleds(PC, MA, MB, LAC, MQ, IF, DF);
+        setleds(PC, IR, MA, MB, LAC, MQ, IF, DF);
 #endif
         break;                                          /* end case IOT */
         }                                               /* end switch opcode */
@@ -1718,19 +1719,16 @@ return SCPE_OK;
 
 #ifdef PIDP8
 
-uint32 tempLeds=0;
-void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sIF, int32 sDF)
+void setleds(uint32 sPC, uint32 sIR, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sIF, int32 sDF)
 {
     leds.PC = sPC;
     leds.MA = sMA;
     leds.MB = sMB;
     leds.AC = sLAC;
     leds.MQ = sMQ;
+    leds.SC = SC;
 
-    // instruction leds: decode instruction in memory (could also be found in IR)
-    //this *should* be found in IR, methinks. Just from memory is possibly problematic
-    int insn = M[sMA];
-    int opcode = (insn & 0xE00) >> 9;
+    int opcode = (sIR & 0xE00) >> 9;
 
     leds.AND = (opcode == 0);
     leds.TAD = (opcode == 1);
@@ -1742,7 +1740,7 @@ void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sI
     leds.OPR = (opcode == 7);
 
     leds.DEFER = (opcode <= 5) &&   // <=5: all memory reference instructions
-                 (insn & 0x100);    // indirect addressing
+                 (sIR & 0x100);     // indirect addressing
 
     leds.ION = !!(int_req & INT_ION);
     leds.RUN = run_flop;
