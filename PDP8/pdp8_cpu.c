@@ -245,7 +245,7 @@ InstHistory *hst = NULL;                                /* instruction history *
 
 #ifdef PIDP8
 void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sIF, int32 sDF);
-int swStop = 0, swSingStep = 0;
+int run_flop = 1;
 #endif
 
 t_stat cpu_ex (t_value *vptr, t_addr addr, UNIT *uptr, int32 sw);
@@ -370,14 +370,17 @@ while (reason == 0) {                                   /* loop until halted */
         // IR = 0               // clear IR (handbook says so but would be weird)
         MB = 0;                 // clear MB.
         MA = PC & 07777;            // transfer PC into MA  (not necessary because IR is redone in code below?
-        swStop = 0;
+        run_flop = 1;
     }
 
-    if (switches_event.CONT) {
+    if (switches_event.CONT) {  // Is this edge or level triggered in a real PDP8?
         switches_event.CONT = 0;
-        swStop = 0;             // meaning resume execution
-            // ? is this done: MB contains instruction to be executed after CONT is pressed
-        goto contPoint;             // note: only for cont not for start
+        run_flop = 1;
+    }
+
+    if  (switches.STOP)         // Edge or level ?
+    {
+        run_flop = 0;
     }
 
     if (switches.LOAD_ADD)
@@ -406,13 +409,14 @@ while (reason == 0) {                                   /* loop until halted */
         PC = (PC + 1) & 07777;          // increment PC
     }
 
-    // do what needs to be done in STOP mode:
-    if (swStop==1)
-    {   setleds(PC, MA, MB, LAC, MQ, IF, DF);       // note MB used in this call, not M[MA]
-        sim_interval = sim_interval - 1;        // otherwise, CTRL-E will never be acted upon in stop mode
-                                // WARNING: THIS MAY LEAD TO TROUBLE. MAYBE?
+    if (!run_flop) {    // keep marking time when stopped
+        sim_interval -= 1;
+        setleds(PC, MA, MB, LAC, MQ, IF, DF);
         continue;
     }
+
+    if (switches.SING_INST)
+        run_flop = 0;
 #endif
 
     if (int_req > INT_PENDING) {                        /* interrupt? */
@@ -442,26 +446,7 @@ while (reason == 0) {                                   /* loop until halted */
     sim_interval = sim_interval - 1;
 
 #ifdef PIDP8
-    setleds(PC, MA, M[MA], LAC, MQ, IF, DF); // note M[MA] used not MB
-
-    if  (switches.STOP)          // STOP switch activated
-    {   swStop = 1;
-        continue;
-    }
-
-contPoint:   // goto here if CONT has been pressed to finish current instruction
-
-    // SING_STEP: swStop=0 if we're here. If SingStep then this time, let it go but trigger a stop on the next pass
-
-    if (switches.SING_INST)      // SING_INST switch activated
-    {   if (swSingStep==0)      // allow it this time,
-            swSingStep=1;       // but note to block it next time!
-        else                // else: this is the next time...
-        {   swSingStep=0;       // reset flipflop
-            swStop=1;       // and do what you do when STOP is pressed.
-            continue;
-        }
-    }
+    setleds(PC, MA, IR, LAC, MQ, IF, DF);
 #endif
 
 /* Instruction decoding.
@@ -1028,7 +1013,7 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
 #ifndef PIDP8
                     reason = STOP_HALT;
 #else
-                    swStop=1;   // don't step out of simulation, just do STOP
+                    run_flop = 0;   // don't step out of simulation, just do STOP
 #endif
 
                 }
@@ -1473,9 +1458,9 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
                     // simh does not distinguish between the various Data Break types.
                     // WC, CA and Break are lit up jointly on the PiDP. Although this can be improved upon.
 
-                    // leds.WRDCT = 1
-                    // leds.CURAD = 1
-                    // leds.BREAK = 1
+                    // leds.WRDCT = 1;
+                    // leds.CURAD = 1;
+                    leds.BREAK = 1;
                 }
 
                 if (iot_data >= IOT_REASON)
@@ -1490,6 +1475,8 @@ switch ((IR >> 7) & 037) {                              /* decode IR<0:4> */
         leds.WRDCT = 0;
         leds.CURAD = 0;
         leds.BREAK = 0;
+
+        setleds(PC, MA, MB, LAC, MQ, IF, DF);
 #endif
         break;                                          /* end case IOT */
         }                                               /* end switch opcode */
@@ -1758,7 +1745,7 @@ void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sI
                  (insn & 0x100);    // indirect addressing
 
     leds.ION = !!(int_req & INT_ION);
-    leds.RUN = (swStop == 0);
+    leds.RUN = run_flop;
 
     // DF & IF in simh live in the 3 bits of octal digit #5...
     leds.DF = sDF >> 12;
