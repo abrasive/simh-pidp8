@@ -190,6 +190,7 @@
 
 #include "pdp8_defs.h"
 #include "pidp8_gpio.h"
+#include "pidp8_cmds.h"
 
 #define PCQ_SIZE        64                              /* must be 2**n */
 #define PCQ_MASK        (PCQ_SIZE - 1)
@@ -245,17 +246,6 @@ InstHistory *hst = NULL;                                /* instruction history *
 #ifdef PIDP8
 void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sIF, int32 sDF);
 int swStop = 0, swSingStep = 0;
-char mountedFiles[8][CBUFSIZE];
-char    swDevCode[4];
-int awfulHackFlag=0;    // truly terrible even for me - break out of sim and start new script in scp.c
-
-#include <dirent.h> // for USB stick searching
-int mountUSBStickFile(int devNo, char *devCode, char *sPath);
-extern t_stat attach_cmd (int32 flag, char *cptr); // from scp
-extern t_stat do_cmd (int32 flag, char *cptr); // from scp
-extern t_stat spawn_cmd (int32 flag, char *cptr);
-extern t_stat exit_cmd (int32 flag, char *cptr);
-char xcbuf[CBUFSIZE], *xcptr;
 #endif
 
 t_stat cpu_ex (t_value *vptr, t_addr addr, UNIT *uptr, int32 sw);
@@ -352,8 +342,6 @@ int_req = INT_UPDATE;
 reason = 0;
 
 #ifdef PIDP8
-int swDevice;
-char sScript[256];
 MA = 0; // have to add this to avoid crash when stop switch is set at start - MA would be undefined in setleds
 setleds(PC, MA, MB, LAC, MQ, IF, DF);
 #endif
@@ -363,8 +351,6 @@ setleds(PC, MA, MB, LAC, MQ, IF, DF);
 while (reason == 0) {                                   /* loop until halted */
 
 #ifdef PIDP8
-    awfulHackFlag = 0; // no do script pending. Did I mention awful?
-
     leds.FETCH = 1;
     leds.EXEC = 0;
 #endif
@@ -375,88 +361,7 @@ while (reason == 0) {                                   /* loop until halted */
         }
 
 #ifdef PIDP8
-    // this bit of code detects SING_INST as the special features switch.
-    // when DF switches are set, that raises a hacked-in-to-simh signal to ATTACH PTR <filename>
-    // when IF switches are set, that raises a hacked-in-to-simh signal to DO <filename> (boot script)
-
-    if (switches_event.SING_STEP) {
-        switches_event.SING_STEP = 0;
-        // 1. Scan DF to see if any devices need to be mounted (DF=0 --> nothing to mount)
-
-        swDevice = switches.DF;
-
-        if (swDevice!=0)
-        {
-            switch(swDevice)
-            {
-                case 1: strcpy(swDevCode,"ptr"); break; // PTR paper tape reader
-                case 2: strcpy(swDevCode,"ptp"); break; // High speed paper tape punch
-                case 3: strcpy(swDevCode,"dt0"); break; // TC08 DECtape (#8 is first!)
-                case 4: strcpy(swDevCode,"dt1"); break;
-                case 5: strcpy(swDevCode,"rx0"); break; // RX8E (8/e peripheral!)
-                case 6: strcpy(swDevCode,"rx1"); break;
-                case 7: strcpy(swDevCode,"rl0"); break; // RL8A
-            }
-            xcptr=&xcbuf[0];                // set string pointer to start
-            mountUSBStickFile(swDevice, swDevCode, xcptr);
-        }
-
-        // 2. Scan IF to see if we need to reboot with a new bootscript
-
-        swDevice = switches.IF;
-
-        if (swDevice!=0)
-        {
-            sprintf(sScript,"/opt/pidp8/bootscripts/%d.script", swDevice);  // make filename
-            printf("\r\n\nRebooting %s\r\n\n", sScript);
-            reason = STOP_HALT;
-            awfulHackFlag = swDevice;   // this triggers a do command after leaving the simulator run.
-        }
-
-        // 3. Scan for shutdown command (Sing_Step + Sing_inst + Start)
-
-        if (switches.SING_INST && switches.START)
-        {
-            printf("\r\nShutdown\r\n\r\n");
-            reason = STOP_HALT;
-            awfulHackFlag = 8;  // this triggers an exit command after leaving the simulator run.
-            if(spawn_cmd ((int32) 0, " shutdown -h -t 1 now")!=SCPE_OK)     // issue simh attach command (no sudo in buildroot)
-                printf("\r\n\n\nshutdown failed\r\n\n");
-        }
-
-        // 4. Scan for host reboot command (Sing_Step + Sing_Inst + Cont)
-
-        if (switches.SING_INST && switches.CONT)
-        {
-            printf("\r\nReboot\r\n\r\n");
-            reason = STOP_HALT;
-            awfulHackFlag = 8;      // this triggers an exit command after leaving the simulator run.
-            if(spawn_cmd ((int32) 0, " reboot")!=SCPE_OK) {// no sudo in buildroot env
-                printf("\r\n\n\nreboot failed\r\n\n");
-            }
-        }
-
-
-        // 5. Scan for mount command (Sing_Step + Sing_Inst + Load Add)
-
-        if (switches.SING_INST && switches.LOAD_ADD)
-        {
-            printf("\r\nMount\r\n\r\n");
-            if(spawn_cmd ((int32) 0, " /opt/pidp8/bin/automount")!=SCPE_OK) {// no sudo in buildroot env
-                printf("\r\n\n\nmount USB drive failed\r\n\n");
-            }
-        }
-
-        // 6. Scan for unmount command (Sing_Step + Sing_Inst + Deposit)
-
-        if (switches.SING_INST && switches.DEP)
-        {
-            printf("\r\nUnmount\r\n\r\n");
-            if(spawn_cmd ((int32) 0, " /opt/pidp8/bin/unmount")!=SCPE_OK) {// no sudo in buildroot env
-                printf("\r\n\n\nunmount failed\r\n\n");
-            }
-        }
-    }
+    reason = pidp8_handle_sing_step();
 
     if (switches_event.START) {
         switches_event.START = 0;
@@ -1860,75 +1765,5 @@ void setleds(uint32 sPC, uint32 sMA, uint16 sMB, int32 sLAC, int32 sMQ, int32 sI
     leds.IF = sIF >> 12;
     // Link
     leds.LINK = !!(sLAC & 010000);
-}
-
-int mountUSBStickFile(int devNo, char *devCode, char *sPath)
-{
-    char    sUSBPath[CBUFSIZE];     // will be "/media/usb0" etc
-    char    sFoundFile[CBUFSIZE];       // path & name of file that is found
-    char    fileExtension[4];       // will be ".RX" etc
-    FILE    *fp;
-    DIR     *pDir;
-    struct  dirent *pDirent;
-    int     i,j, alreadyMounted;
-
-    fileExtension[0]='.';           // extension starts with a .
-    strncpy(&fileExtension[1], devCode, 2); // extension is PT, RX, RL etc
-    fileExtension[2]=0;         // don't want device number
-    sFoundFile[0]=0;            // empty string, no file found yet
-
-    // if mounting another image to a device, clear the current file from the mountlist:
-    mountedFiles[devNo][0]=0x00;
-
-    for (i=0;i<8;i++)               // search all 8 USB mount points
-    {
-        sprintf(sUSBPath,"/media/usb%d",i); // usb sticks are numbered 0..7
-        pDir = opendir(sUSBPath);
-        if (pDir==NULL)             // that means usbmount not installed?
-        {   printf("\r\nCannot open usb%d directory\r\n", i); return 1; }
-
-        while ((pDirent = readdir(pDir)) != NULL) // search all files in directory
-        {
-            if (strstr(pDirent->d_name,fileExtension))
-            {
-                sprintf(sPath, "%s/%s", sUSBPath, pDirent->d_name);
-                alreadyMounted=0;
-                for (j=0;j<7;j++)
-                {
-                    if (strncmp(mountedFiles[j],sPath, CBUFSIZE)==0)
-                        alreadyMounted=1;
-                }
-                if (alreadyMounted==0)
-                {
-                    strcpy(sFoundFile, sPath);
-                    break;
-                }
-            }
-        }
-        closedir (pDir);
-
-        if (sFoundFile[0]!=0)
-            break;
-    }
-
-    if (sFoundFile[0]==0x00)            // no file found, exit
-    {   printf("\r\nNo unmounted %s file found\r\n", devCode);  return 1;   }
-
-    fp = fopen(sFoundFile, "r");            // check file is OK
-    if (fp==NULL)
-    {   printf("\r\nError opening file %s\r\n", sFoundFile);    return 1;   }
-    fclose (fp);
-
-
-    sprintf(sPath,"%s %s", devCode, sFoundFile);    // print cmd string
-
-    if(attach_cmd ((int32) 0, xcptr)==SCPE_OK)      // issue simh attach command
-    {   strcpy(mountedFiles[devNo], sFoundFile);        // add file to mount list
-printf("\r\nMounted %s %s\r\n", devCode, mountedFiles[devNo]);
-    }
-    else
-    {   printf("\r\nSimH error mounting %s\r\n", devCode);  return 1;   }
-
-    return 0;
 }
 #endif

@@ -321,10 +321,6 @@
     else if (sim_switches & SWMASK ('H')) val = 16; \
     else val = dft;
 
-#ifdef PIDP8
-extern int awfulHackFlag;
-#endif
-
 /* Asynch I/O support */
 #if defined (SIM_ASYNCH_IO)
 pthread_mutex_t sim_asynch_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -2059,22 +2055,6 @@ CTAB *cmdp;
 
 stat = SCPE_BARE_STATUS(stat);                          /* remove possible flag */
 while (stat != SCPE_EXIT) {                             /* in case exit */
-#ifdef PIDP8
-if (awfulHackFlag!=0) {
-  if (awfulHackFlag==8)
-    sprintf(cbuf, "exit");	// inject command into command line processor.
-  else
-    sprintf(cbuf, "do /opt/pidp8/bootscripts/%d.script", awfulHackFlag);
-  cptr = cbuf;
- }
- else if ((cptr = sim_brk_getact (cbuf, sizeof(cbuf))))   /* pending action? */
-   printf ("%s%s\n", sim_prompt, cptr);            /* echo */
- else if (sim_vm_read != NULL) {                     /* sim routine? */
-   printf ("%s", sim_prompt);                      /* prompt */
-   cptr = (*sim_vm_read) (cbuf, sizeof(cbuf), stdin);
- }
- else cptr = read_line_p (sim_prompt, cbuf, sizeof(cbuf), stdin);/* read with prmopt*/
-#else
     if ((cptr = sim_brk_getact (cbuf, sizeof(cbuf))))   /* pending action? */
         printf ("%s%s\n", sim_prompt, cptr);            /* echo */
     else if (sim_vm_read != NULL) {                     /* sim routine? */
@@ -2082,7 +2062,6 @@ if (awfulHackFlag!=0) {
         cptr = (*sim_vm_read) (cbuf, sizeof(cbuf), stdin);
         }
     else cptr = read_line_p (sim_prompt, cbuf, sizeof(cbuf), stdin);/* read with prmopt*/
-#endif
     if (cptr == NULL) {                                 /* EOF? */
         if (sim_ttisatty()) continue;                   /* ignore tty EOF */
         else break;                                     /* otherwise exit */
