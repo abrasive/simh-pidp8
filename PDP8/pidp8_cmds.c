@@ -121,8 +121,8 @@ int pidp8_handle_sing_step(void) {
 
     if (switches.SING_INST && switches.START)
     {
-        sim_printf("Shutdown request");
-        execute_cmd("SPAWN shutdown -h -t 1 now");
+        sim_printf("Shutdown request\n");
+        execute_cmd("! shutdown -h -t 1 now");
         return SCPE_EXIT;
     }
 
@@ -130,8 +130,8 @@ int pidp8_handle_sing_step(void) {
 
     if (switches.SING_INST && switches.CONT)
     {
-        sim_printf("Reboot request");
-        execute_cmd("SPAWN reboot");
+        sim_printf("Reboot request\n");
+        execute_cmd("! reboot");
         return SCPE_EXIT;
     }
 
@@ -139,7 +139,7 @@ int pidp8_handle_sing_step(void) {
 
     if (switches.SING_INST && switches.LOAD_ADD)
     {
-        execute_cmd("SPAWN /opt/pidp8/bin/automount");
+        execute_cmd("! /opt/pidp8/bin/automount");
         return 0;
     }
 
@@ -147,7 +147,7 @@ int pidp8_handle_sing_step(void) {
 
     if (switches.SING_INST && switches.DEP)
     {
-        execute_cmd("SPAWN /opt/pidp8/bin/unmount");
+        execute_cmd("! /opt/pidp8/bin/unmount");
         return 0;
     }
 
