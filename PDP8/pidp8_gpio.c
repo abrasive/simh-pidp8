@@ -113,6 +113,16 @@ void *blink(int *terminate)
     sp.sched_priority = 98; // maybe 99, 32, 31?
     if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp))
     { fprintf(stderr, "warning: failed to set RT priority\n"); }
+
+#ifdef SERIALSETUP
+    // Disable the hysteresis on the GPIO inputs to increase V_il
+    struct bcm2835_peripheral pads;
+    #define BCM2835_GPIO_PADS 0x100000
+    pads.addr_p = bcm_host_get_peripheral_address() + BCM2835_GPIO_PADS;
+    map_peripheral(&pads);
+    pads.addr[0x2c/4] = (pads.addr[0x2c/4] & 0xf7) | (0x5A << 24);
+#endif
+
     // --------------------------------------------------
     if(map_peripheral(&gpio) == -1)
     {   printf("Failed to map the physical GPIO registers into the virtual memory space.\n");
